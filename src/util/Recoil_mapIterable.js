@@ -4,6 +4,7 @@
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *
+ * @emails oncall+recoil
  * @flow strict
  * @format
  */
@@ -19,7 +20,7 @@ function mapIterable<T, K>(
   callback: (v: T, index: number) => K,
 ): Iterable<K> {
   // Use generator to create iterable/iterator
-  return (function* () {
+  return (function*() {
     let index = 0;
     for (const value of iterable) {
       yield callback(value, index++);

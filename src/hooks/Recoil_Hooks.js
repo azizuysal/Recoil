@@ -4,60 +4,53 @@
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *
- * @emails oncall+perf_viz
+ * @emails oncall+recoil
  * @flow strict-local
  * @format
  */
 'use strict';
 
-import type {PersistenceType} from '../recoil_values/Recoil_atom';
-import type {Loadable} from '../adt/Recoil_Loadable';
-import type {DefaultValue} from '../core/Recoil_Node';
-import type {
-  ComponentSubscription,
-  RecoilState,
-  RecoilValue,
-} from '../core/Recoil_RecoilValue';
-import type {NodeKey, Store, TreeState} from '../core/Recoil_State';
+import type { Loadable } from '../adt/Recoil_Loadable';
+import type { DefaultValue } from '../core/Recoil_Node';
+import type { RecoilState } from '../core/Recoil_RecoilValue';
+import type { ComponentSubscription } from '../core/Recoil_RecoilValueInterface';
+import type { NodeKey, TreeState } from '../core/Recoil_State';
 
-const {useCallback, useEffect, useMemo, useRef, useState} = require('React');
-const {setByAddingToSet} = require('../util/Recoil_CopyOnWrite');
+const { useCallback, useEffect, useMemo, useRef, useState } = require('React');
 const {
-  getNodeLoadable,
   peekNodeLoadable,
   setNodeValue,
 } = require('../core/Recoil_FunctionalCore');
-const {
-  DEFAULT_VALUE,
-  RecoilValueNotReady,
-  getNode,
-  nodes,
-} = require('../core/Recoil_Node');
-const {useStoreRef} = require('../components/Recoil_RecoilRoot.react');
+const { DEFAULT_VALUE, getNode, nodes } = require('../core/Recoil_Node');
+const { useStoreRef } = require('../core/Recoil_RecoilRoot.react');
+const { isRecoilValue } = require('../core/Recoil_RecoilValue');
 const {
   AbstractRecoilValue,
   getRecoilValueAsLoadable,
   setRecoilValue,
   setUnvalidatedRecoilValue,
   subscribeToRecoilValue,
-} = require('../core/Recoil_RecoilValue');
-const Tracing = require('../util/Recoil_Tracing');
-
+  valueFromValueOrUpdater,
+} = require('../core/Recoil_RecoilValueInterface');
+const { Snapshot, cloneSnapshot } = require('../core/Recoil_Snapshot');
+const { setByAddingToSet } = require('../util/Recoil_CopyOnWrite');
 const differenceSets = require('../util/Recoil_differenceSets');
 const expectationViolation = require('../util/Recoil_expectationViolation');
 const filterMap = require('../util/Recoil_filterMap');
-const gkx = require('../util/Recoil_gkx');
 const intersectSets = require('../util/Recoil_intersectSets');
 const invariant = require('../util/Recoil_invariant');
 const mapMap = require('../util/Recoil_mapMap');
 const mergeMaps = require('../util/Recoil_mergeMaps');
 const recoverableViolation = require('../util/Recoil_recoverableViolation');
-const {batchUpdates} = require('../util/Recoil_batch');
 
-function cloneState(state: TreeState, opts): TreeState {
+const { batchUpdates } = require('../util/Recoil_batch');
+
+const Tracing = require('../util/Recoil_Tracing');
+
+
+function cloneState_DEPRECATED(state: TreeState): TreeState {
   return {
-    isSnapshot: opts.isSnapshot,
-    transactionMetadata: {...state.transactionMetadata},
+    transactionMetadata: { ...state.transactionMetadata },
     atomValues: new Map(state.atomValues),
     nonvalidatedAtoms: new Map(state.nonvalidatedAtoms),
     dirtyAtoms: new Set(state.dirtyAtoms),
@@ -91,21 +84,13 @@ function handleLoadable<T>(loadable: Loadable<T>, atom, storeRef): T {
   }
 }
 
-function valueFromValueOrUpdater(store, state, recoilValue, valueOrUpdater) {
-  if (typeof valueOrUpdater === 'function') {
-    // Updater form: pass in the current value. Throw if the current value
-    // is unavailable (namely when updating an async selector that's
-    // pending or errored):
-    const current = peekNodeLoadable(store, state, recoilValue.key);
-    if (current.state === 'loading') {
-      throw new RecoilValueNotReady(recoilValue.key);
-    } else if (current.state === 'hasError') {
-      throw current.contents;
-    }
-    // T itself may be a function, so our refinement is not sufficient:
-    return (valueOrUpdater: any)(current.contents); // flowlint-line unclear-type:off
-  } else {
-    return valueOrUpdater;
+function validateRecoilValue(recoilValue, hookName) {
+  if (!isRecoilValue(recoilValue)) {
+    throw new Error(
+      `Invalid argument to ${hookName}: expected an atom or selector but got ${String(
+        recoilValue,
+      )}`,
+    );
   }
 }
 
@@ -113,27 +98,27 @@ export type SetterOrUpdater<T> = ((T => T) | T) => void;
 export type Resetter = () => void;
 export type RecoilInterface = {
   getRecoilValue: <T>(RecoilValue<T>) => T,
-  getRecoilValueLoadable: <T>(RecoilValue<T>) => Loadable<T>,
+    getRecoilValueLoadable: <T>(RecoilValue<T>) => Loadable<T>,
   getRecoilState: <T>(RecoilState<T>) => [T, SetterOrUpdater<T>],
   getRecoilStateLoadable<T>(RecoilState<T>): [Loadable<T>, SetterOrUpdater<T>],
   getSetRecoilState: <T>(RecoilState<T>) => SetterOrUpdater<T>,
   getResetRecoilState: <T>(RecoilState<T>) => Resetter,
-};
+            };
 
 function useInterface(): RecoilInterface {
   const storeRef = useStoreRef();
   const [_, forceUpdate] = useState([]);
 
   const recoilValuesUsed = useRef<Set<NodeKey>>(new Set());
-  recoilValuesUsed.current = new Set(); // Track the RecoilValues used just during this render
+              recoilValuesUsed.current = new Set(); // Track the RecoilValues used just during this render
   const previousSubscriptions = useRef<Set<NodeKey>>(new Set());
   const subscriptions = useRef<Map<NodeKey, ComponentSubscription>>(new Map());
 
-  const unsubscribeFrom = useCallback(
+                  const unsubscribeFrom = useCallback(
     key => {
       const sub = subscriptions.current.get(key);
       if (sub) {
-        sub.release(storeRef.current);
+                      sub.release(storeRef.current);
         subscriptions.current.delete(key);
       }
     },
@@ -155,7 +140,7 @@ function useInterface(): RecoilInterface {
       previousSubscriptions.current,
     ).forEach(key => {
       if (subscriptions.current.has(key)) {
-        expectationViolation(`Double subscription to RecoilValue "${key}"`);
+                      expectationViolation(`Double subscription to RecoilValue "${key}"`);
         return;
       }
 
@@ -163,14 +148,14 @@ function useInterface(): RecoilInterface {
         store,
         new AbstractRecoilValue(key),
         state => {
-          Tracing.trace('RecoilValue subscription fired', key, () => {
-            updateState(state, key);
-          });
+                      Tracing.trace('RecoilValue subscription fired', key, () => {
+                        updateState(state, key);
+                      });
         },
       );
       subscriptions.current.set(key, sub);
       Tracing.trace('initial update on subscribing', key, () => {
-        updateState(store.getState(), key);
+                      updateState(store.getState(), key);
       });
     });
 
@@ -178,7 +163,7 @@ function useInterface(): RecoilInterface {
       previousSubscriptions.current,
       recoilValuesUsed.current,
     ).forEach(key => {
-      unsubscribeFrom(key);
+                      unsubscribeFrom(key);
     });
 
     previousSubscriptions.current = recoilValuesUsed.current;
@@ -190,16 +175,17 @@ function useInterface(): RecoilInterface {
   }, [unsubscribeFrom]);
 
   return useMemo(() => {
-    function useSetRecoilState<T>(
-      recoilState: RecoilState<T>,
-    ): SetterOrUpdater<T> {
-      return (
-        newValueOrUpdater: (T => T | DefaultValue) | T | DefaultValue,
+                      function useSetRecoilState<T>(
+                        recoilState: RecoilState<T>,
+                      ): SetterOrUpdater<T> {
+                        if (__DEV__) {
+                          validateRecoilValue(recoilState, 'useSetRecoilState');
+                        }
+                        return (
+                          newValueOrUpdater: (T => T | DefaultValue) | T | DefaultValue,
       ) => {
-        const storeState = storeRef.current.getState();
         const newValue = valueFromValueOrUpdater(
           storeRef.current,
-          storeState.nextTree ?? storeState.currentTree,
           recoilState,
           newValueOrUpdater,
         );
@@ -208,23 +194,32 @@ function useInterface(): RecoilInterface {
     }
 
     function useResetRecoilState<T>(recoilState: RecoilState<T>): Resetter {
+      if (__DEV__) {
+                        validateRecoilValue(recoilState, 'useResetRecoilState');
+      }
       return () => setRecoilValue(storeRef.current, recoilState, DEFAULT_VALUE);
     }
 
     function useRecoilValueLoadable<T>(
       recoilValue: RecoilValue<T>,
     ): Loadable<T> {
+      if (__DEV__) {
+                              validateRecoilValue(recoilValue, 'useRecoilValueLoadable');
+      }
       if (!recoilValuesUsed.current.has(recoilValue.key)) {
-        recoilValuesUsed.current = setByAddingToSet(
-          recoilValuesUsed.current,
-          recoilValue.key,
-        );
+                              recoilValuesUsed.current = setByAddingToSet(
+                                recoilValuesUsed.current,
+                                recoilValue.key,
+                              );
       }
       // TODO Restore optimization to memoize lookup
       return getRecoilValueAsLoadable(storeRef.current, recoilValue);
     }
 
     function useRecoilValue<T>(recoilValue: RecoilValue<T>): T {
+      if (__DEV__) {
+                                validateRecoilValue(recoilValue, 'useRecoilValue');
+      }
       const loadable = useRecoilValueLoadable(recoilValue);
       return handleLoadable(loadable, recoilValue, storeRef);
     }
@@ -232,12 +227,18 @@ function useInterface(): RecoilInterface {
     function useRecoilState<T>(
       recoilState: RecoilState<T>,
     ): [T, SetterOrUpdater<T>] {
+      if (__DEV__) {
+                                      validateRecoilValue(recoilState, 'useRecoilState');
+      }
       return [useRecoilValue(recoilState), useSetRecoilState(recoilState)];
     }
 
     function useRecoilStateLoadable<T>(
       recoilState: RecoilState<T>,
     ): [Loadable<T>, SetterOrUpdater<T>] {
+      if (__DEV__) {
+                                            validateRecoilValue(recoilState, 'useRecoilStateLoadable');
+      }
       return [
         useRecoilValueLoadable(recoilState),
         useSetRecoilState(recoilState),
@@ -245,7 +246,7 @@ function useInterface(): RecoilInterface {
     }
 
     return {
-      getRecoilValue: useRecoilValue,
+                                            getRecoilValue: useRecoilValue,
       getRecoilValueLoadable: useRecoilValueLoadable,
       getRecoilState: useRecoilState,
       getRecoilStateLoadable: useRecoilStateLoadable,
@@ -326,7 +327,7 @@ function useRecoilStateLoadable<T>(
   return [value, setValue];
 }
 
-function useTransactionSubscription(callback: (Store, TreeState) => void) {
+function useTransactionSubscription(callback: Store => void) {
   const storeRef = useStoreRef();
   useEffect(() => {
     const sub = storeRef.current.subscribeToTransactions(callback);
@@ -335,33 +336,31 @@ function useTransactionSubscription(callback: (Store, TreeState) => void) {
 }
 
 // TODO instead of force update can put snapshot into local state
-function useTreeStateClone(): TreeState {
+function useTreeStateClone_DEPRECATED(): TreeState {
   const [_, setState] = useState(0);
   const forceUpdate = useCallback(() => setState(x => x + 1), []);
   useTransactionSubscription(forceUpdate);
   const storeRef = useStoreRef();
-  return cloneState(storeRef.current.getState().currentTree, {
-    isSnapshot: true,
-  });
+  return cloneState_DEPRECATED(storeRef.current.getState().currentTree);
 }
 
 type UpdatedSnapshot = {
-  atomValues: Map<NodeKey, mixed>,
+                                                                atomValues: Map<NodeKey, mixed>,
   updatedAtoms: Set<NodeKey>,
-};
+                                                              };
 
-function useSnapshotWithStateChange(
+                                                              function useSnapshotWithStateChange_DEPRECATED(
   transaction: (<T>(RecoilState<T>, (T) => T) => void) => void,
 ): UpdatedSnapshot {
   const storeRef = useStoreRef();
-  let snapshot = useTreeStateClone();
+  let snapshot = useTreeStateClone_DEPRECATED();
   const update = <T>({key}: RecoilState<T>, updater: T => T) => {
-    [snapshot] = setNodeValue(
-      storeRef.current,
-      snapshot,
-      key,
-      peekNodeLoadable(storeRef.current, snapshot, key).map(updater),
-    );
+                                                                    [snapshot] = setNodeValue(
+                                                                      storeRef.current,
+                                                                      snapshot,
+                                                                      key,
+                                                                      peekNodeLoadable(storeRef.current, snapshot, key).map(updater),
+                                                                    );
   };
 
   transaction(update);
@@ -382,7 +381,7 @@ function externallyVisibleAtomValuesInState(
   state: TreeState,
 ): Map<NodeKey, mixed> {
   const atomValues: Map<NodeKey, Loadable<mixed>> = state.atomValues;
-  const persistedAtomContentsValues = mapMap(
+                                                                    const persistedAtomContentsValues = mapMap(
     filterMap(atomValues, (v, k) => {
       const node = getNode(k);
       const persistence = node.options?.persistence_UNSTABLE;
@@ -400,8 +399,8 @@ function externallyVisibleAtomValuesInState(
 }
 
 type ExternallyVisibleAtomInfo = {
-  persistence_UNSTABLE: {
-    type: PersistenceType,
+                                                                        persistence_UNSTABLE: {
+                                                                        type: PersistenceType,
     backButton: boolean,
     ...
   },
@@ -432,63 +431,153 @@ type ExternallyVisibleAtomInfo = {
           useSetUnvalidatedAtomValues hook. Useful for ignoring the useSetUnvalidatedAtomValues
           transaction, to avoid loops.
 */
-function useTransactionObservation(
+function useTransactionObservation_DEPRECATED(
   callback: ({
-    atomValues: Map<NodeKey, mixed>,
+                                                                        atomValues: Map<NodeKey, mixed>,
     previousAtomValues: Map<NodeKey, mixed>,
     atomInfo: Map<NodeKey, ExternallyVisibleAtomInfo>,
     modifiedAtoms: Set<NodeKey>,
     transactionMetadata: {[NodeKey]: mixed, ...},
   }) => void,
 ) {
-  useTransactionSubscription(
-    useCallback(
-      (store, previousState) => {
-        let nextTree = store.getState().nextTree;
-        if (!nextTree) {
-          recoverableViolation(
-            'Transaction subscribers notified without a next tree being present -- this is a bug in Recoil',
-            'recoil',
-          );
-          nextTree = store.getState().currentTree; // attempt to trundle on
-        }
-        const atomValues = externallyVisibleAtomValuesInState(nextTree);
-        const previousAtomValues = externallyVisibleAtomValuesInState(
-          previousState,
-        );
-        const atomInfo = mapMap(nodes, node => ({
-          persistence_UNSTABLE: {
-            type: node.options?.persistence_UNSTABLE?.type ?? 'none',
-            backButton: node.options?.persistence_UNSTABLE?.backButton ?? false,
-          },
-        }));
-        const modifiedAtoms = new Set(nextTree.dirtyAtoms);
-        callback({
-          atomValues,
-          previousAtomValues,
-          atomInfo,
-          modifiedAtoms,
-          transactionMetadata: {...nextTree.transactionMetadata},
-        });
-      },
-      [callback],
-    ),
-  );
+                                                                          useTransactionSubscription(
+                                                                            useCallback(
+                                                                              store => {
+                                                                                const previousState = store.getState().currentTree;
+                                                                                let nextState = store.getState().nextTree;
+                                                                                if (!nextState) {
+                                                                                  recoverableViolation(
+                                                                                    'Transaction subscribers notified without a next tree being present -- this is a bug in Recoil',
+                                                                                    'recoil',
+                                                                                  );
+                                                                                  nextState = store.getState().currentTree; // attempt to trundle on
+                                                                                }
+
+                                                                                const atomValues = externallyVisibleAtomValuesInState(nextState);
+                                                                                const previousAtomValues = externallyVisibleAtomValuesInState(
+                                                                                  previousState,
+                                                                                );
+                                                                                const atomInfo = mapMap(nodes, node => ({
+                                                                                  persistence_UNSTABLE: {
+                                                                                    type: node.options?.persistence_UNSTABLE?.type ?? 'none',
+                                                                                    backButton: node.options?.persistence_UNSTABLE?.backButton ?? false,
+                                                                                  },
+                                                                                }));
+                                                                                const modifiedAtoms = new Set(nextState.dirtyAtoms);
+
+                                                                                callback({
+                                                                                  atomValues,
+                                                                                  previousAtomValues,
+                                                                                  atomInfo,
+                                                                                  modifiedAtoms,
+                                                                                  transactionMetadata: { ...nextState.transactionMetadata },
+                                                                                });
+                                                                              },
+                                                                              [callback],
+                                                                            ),
+                                                                          );
 }
 
-function useGoToSnapshot(): UpdatedSnapshot => void {
+function useRecoilTransactionObserver(
+  callback: ({
+                                                                          snapshot: Snapshot,
+    previousSnapshot: Snapshot,
+  }) => void,
+) {
+                                                                          useTransactionSubscription(
+                                                                            useCallback(
+                                                                              store => {
+                                                                                const previousState = store.getState().currentTree;
+                                                                                let nextState = store.getState().nextTree;
+                                                                                if (!nextState) {
+                                                                                  recoverableViolation(
+                                                                                    'Transaction subscribers notified without a next tree being present -- this is a bug in Recoil',
+                                                                                    'recoil',
+                                                                                  );
+                                                                                  nextState = previousState; // attempt to trundle on
+                                                                                }
+
+                                                                                callback({
+                                                                                  snapshot: cloneSnapshot(nextState),
+                                                                                  previousSnapshot: cloneSnapshot(previousState),
+                                                                                });
+                                                                              },
+                                                                              [callback],
+                                                                            ),
+                                                                          );
+}
+
+// Return a snapshot of the current state and subscribe to all state changes
+function useRecoilSnapshotAndSubscribe(): Snapshot {
+  const store = useStoreRef();
+  const [snapshot, setSnapshot] = useState(() =>
+    cloneSnapshot(store.current.getState().currentTree),
+  );
+  useTransactionSubscription(
+    useCallback(
+      store =>
+        setSnapshot(
+          cloneSnapshot(
+            store.getState().nextTree ?? store.getState().currentTree,
+          ),
+        ),
+      [],
+    ),
+  );
+  return snapshot;
+}
+
+function useGoToSnapshot_DEPRECATED(): UpdatedSnapshot => void {
   const storeRef = useStoreRef();
   return (snapshot: UpdatedSnapshot) => {
-    batchUpdates(() => {
-      snapshot.updatedAtoms.forEach(key => {
-        setRecoilValue(
-          storeRef.current,
-          new AbstractRecoilValue(key),
-          snapshot.atomValues.get(key),
-        );
-      });
-    });
+                                                                          batchUpdates(() => {
+                                                                            snapshot.updatedAtoms.forEach(key => {
+                                                                              setRecoilValue(
+                                                                                storeRef.current,
+                                                                                new AbstractRecoilValue(key),
+                                                                                snapshot.atomValues.get(key),
+                                                                              );
+                                                                            });
+                                                                          });
   };
+}
+
+function useGotoRecoilSnapshot(): Snapshot => void {
+  const storeRef = useStoreRef();
+  return useCallback(
+    (snapshot: Snapshot) => {
+                                                                          ReactDOM.unstable_batchedUpdates(() => {
+                                                                            storeRef.current.replaceState(prevState => {
+                                                                              const nextState = snapshot.getStore_INTERNAL().getState().currentTree;
+
+                                                                              // Fire subscriptions for any atoms that changed values
+                                                                              const updatedKeys = new Set();
+                                                                              // Going through both seems to be more efficient than constructing a union set of keys
+                                                                              for (const keys of [
+                                                                                prevState.atomValues.keys(),
+                                                                                nextState.atomValues.keys(),
+                                                                              ]) {
+                                                                                for (const key of keys) {
+                                                                                  if (
+                                                                                    prevState.atomValues.get(key)?.contents !==
+                                                                                    nextState.atomValues.get(key)?.contents
+                                                                                  ) {
+                                                                                    updatedKeys.add(key);
+                                                                                  }
+                                                                                }
+                                                                              }
+                                                                              storeRef.current.fireNodeSubscriptions(updatedKeys, 'enqueue');
+
+                                                                              return {
+                                                                                ...nextState,
+                                                                                nodeToComponentSubscriptions:
+                                                                                  prevState.nodeToComponentSubscriptions,
+                                                                              };
+                                                                            });
+                                                                          });
+    },
+    [storeRef],
+  );
 }
 
 function useSetUnvalidatedAtomValues(): (
@@ -497,68 +586,47 @@ function useSetUnvalidatedAtomValues(): (
 ) => void {
   const storeRef = useStoreRef();
   return (values: Map<NodeKey, mixed>, transactionMetadata: {...} = {}) => {
-    batchUpdates(() => {
-      storeRef.current.addTransactionMetadata(transactionMetadata);
-      values.forEach((value, key) =>
-        setUnvalidatedRecoilValue(
-          storeRef.current,
-          new AbstractRecoilValue(key),
-          value,
-        ),
-      );
-    });
+                                                                          batchUpdates(() => {
+                                                                            storeRef.current.addTransactionMetadata(transactionMetadata);
+                                                                            values.forEach((value, key) =>
+                                                                              setUnvalidatedRecoilValue(
+                                                                                storeRef.current,
+                                                                                new AbstractRecoilValue(key),
+                                                                                value,
+                                                                              ),
+                                                                            );
+                                                                          });
   };
 }
 
 type CallbackInterface = $ReadOnly<{
-  getPromise: <T>(RecoilValue<T>) => Promise<T>,
-  getLoadable: <T>(RecoilValue<T>) => Loadable<T>,
   set: <T>(RecoilState<T>, (T => T) | T) => void,
   reset: <T>(RecoilState<T>) => void,
-}>;
+                                                                          snapshot: Snapshot,
+                                                                          gotoSnapshot: Snapshot => void,
+                                                                          }>;
 
 class Sentinel {}
 const SENTINEL = new Sentinel();
 
-function useRecoilCallback<Args: $ReadOnlyArray<mixed>, Return>(
-  fn: (CallbackInterface, ...Args) => Return,
+function useRecoilCallback<Args: <mixed>, Return>(
+                                                                            fn: CallbackInterface => (...Args) => Return,
   deps?: $ReadOnlyArray<mixed>,
 ): (...Args) => Return {
   const storeRef = useStoreRef();
+  const gotoSnapshot = useGotoRecoilSnapshot();
 
   return useCallback(
-    (...args) => {
-      let snapshot = cloneState(storeRef.current.getState().currentTree, {
-        isSnapshot: true,
-      });
-
-      function getLoadable<T>(recoilValue: RecoilValue<T>): Loadable<T> {
-        let result: Loadable<T>;
-        [snapshot, result] = getNodeLoadable(
-          storeRef.current,
-          snapshot,
-          recoilValue.key,
-        );
-        return result;
-      }
-
-      function getPromise<T>(recoilValue: RecoilValue<T>): Promise<T> {
-        if (gkx('recoil_async_selector_refactor')) {
-          return getLoadable(recoilValue)
-            .toPromise()
-            .then(({value}) => value);
-        } else {
-          return (getLoadable(recoilValue).toPromise(): $FlowFixMe);
-        }
-      }
+    (...args): Return => {
+      // Use currentTree for the snapshot to show the currently committed stable state
+      const snapshot = cloneSnapshot(storeRef.current.getState().currentTree);
 
       function set<T>(
         recoilState: RecoilState<T>,
-        newValueOrUpdater: (T => T) | T,
+                                                                                  newValueOrUpdater: (T => T) | T,
       ) {
         const newValue = valueFromValueOrUpdater(
           storeRef.current,
-          snapshot,
           recoilState,
           newValueOrUpdater,
         );
@@ -566,13 +634,13 @@ function useRecoilCallback<Args: $ReadOnlyArray<mixed>, Return>(
       }
 
       function reset<T>(recoilState: RecoilState<T>) {
-        setRecoilValue(storeRef.current, recoilState, DEFAULT_VALUE);
+                                                                                      setRecoilValue(storeRef.current, recoilState, DEFAULT_VALUE);
       }
 
       let ret = SENTINEL;
       batchUpdates(() => {
-        // flowlint-next-line unclear-type:off
-        ret = (fn: any)({getPromise, getLoadable, set, reset}, ...args);
+                                                                                        // flowlint-next-line unclear-type:off
+                                                                                        ret = (fn: any)({set, reset, snapshot, gotoSnapshot})(...args);
       });
       invariant(
         !(ret instanceof Sentinel),
@@ -585,17 +653,20 @@ function useRecoilCallback<Args: $ReadOnlyArray<mixed>, Return>(
 }
 
 module.exports = {
-  useRecoilCallback,
-  useRecoilValue,
-  useRecoilValueLoadable,
-  useRecoilState,
-  useRecoilStateLoadable,
-  useSetRecoilState,
-  useResetRecoilState,
-  useRecoilInterface: useInterface,
-  useTransactionSubscription,
-  useSnapshotWithStateChange,
-  useTransactionObservation,
-  useGoToSnapshot,
+                                                                                        useRecoilCallback,
+                                                                                        useRecoilValue,
+                                                                                        useRecoilValueLoadable,
+                                                                                        useRecoilState,
+                                                                                        useRecoilStateLoadable,
+                                                                                        useSetRecoilState,
+                                                                                        useResetRecoilState,
+                                                                                        useRecoilInterface: useInterface,
+  useSnapshotWithStateChange_DEPRECATED,
+  useTransactionSubscription_DEPRECATED: useTransactionSubscription,
+  useTransactionObservation_DEPRECATED,
+  useRecoilTransactionObserver,
+  useRecoilSnapshotAndSubscribe,
+  useGoToSnapshot_DEPRECATED,
+  useGotoRecoilSnapshot,
   useSetUnvalidatedAtomValues,
 };
