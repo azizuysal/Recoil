@@ -12,7 +12,9 @@
 'use strict';
 
 if (process.env.NODE_ENV === 'production') { // @oss-only
-  module.exports = require('./recoil.production.js'); // @oss-only
+  // module.exports = require('./recoil.production.js'); // @oss-only
+  module.exports = require('./recoil.production.native');
 } else { // @oss-only
-  module.exports = require('./recoil.development.js'); // @oss-only
+  // module.exports = require('./recoil.development.js'); // @oss-only
+  module.exports = require('./recoil.development.native');
 } // @oss-only
